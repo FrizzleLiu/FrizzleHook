@@ -3,7 +3,9 @@ package com.frizzle.frizzlehook;
 import android.app.Application;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
 import android.content.res.Resources;
@@ -181,10 +183,23 @@ public class HookApplication extends Application {
                     Intent intent = (Intent) intentField.get(obj);
                     Intent intentAction = intent.getParcelableExtra("intentAction");
                     if (intentAction != null) {
-                        if (activityList.contains(intentAction.getComponent().getClassName())) {
-                            intentField.set(obj, intentAction); // 把ProxyActivity 换成  TestActivity
-                        } else { // 没有权限
-                            intentField.set(obj, new Intent(HookApplication.this, PermissionActivity.class));
+//                        if (activityList.contains(intentAction.getComponent().getClassName())) {
+//                            intentField.set(obj, intentAction); // 把ProxyActivity 换成  TestActivity
+//                        } else { // 没有权限
+//                            intentField.set(obj, new Intent(HookApplication.this, PermissionActivity.class));
+//                        }
+
+                        intentField.set(obj, intentAction);
+
+                        //对插件和宿主进行区分
+                        Field activityInfoField = obj.getClass().getDeclaredField("activityInfo");
+                        activityInfoField.setAccessible(true);
+                        ActivityInfo activityInfo = (ActivityInfo) activityInfoField.get(obj);
+                        if (intentAction.getPackage() == null) {//插件
+                            activityInfo.applicationInfo.packageName = intentAction.getComponent().getPackageName();
+                            hookGetPackageInfo();
+                        } else {//宿主
+                            activityInfo.applicationInfo.packageName = intentAction.getPackage();
                         }
                     }
                     //获取的intent其实就是obj(ActivityClientRecord)的成员变量intent
@@ -286,9 +301,9 @@ public class HookApplication extends Application {
     /**
      * 自己创造一个LoadedApk.ClassLoader(LoadedApk以及LoadedApk以及.ClassLoader) 添加到 mPackages，此LoadedApk 专门用来加载插件里面的 class
      */
-    private void customLoadedApkAction() throws Exception{
+    private void customLoadedApkAction() throws Exception {
         File file = new File(Environment.getExternalStorageDirectory() + File.separator + "hook.apk");
-        if (!file.exists()){
+        if (!file.exists()) {
             throw new FileNotFoundException("插件包不存在");
         }
         String pluginPath = file.getAbsolutePath();
@@ -314,21 +329,20 @@ public class HookApplication extends Application {
 
         //参数String dexPath, String optimizedDirectory, String librarySearchPath, ClassLoader parent
         File fileDir = getDir("pulginPathDir", Context.MODE_PRIVATE);
-        PluginClassLoader pluginClassLoader = new PluginClassLoader(pluginPath,fileDir.getAbsolutePath(),null,getClassLoader());
+        PluginClassLoader pluginClassLoader = new PluginClassLoader(pluginPath, fileDir.getAbsolutePath(), null, getClassLoader());
         Field mClassLoaderField = mLoadedApk.getClass().getDeclaredField("mClassLoader");
         mClassLoaderField.setAccessible(true);
         //将自定义的PluginClassLoader赋值给自定义的LoadedApk的ClassLoader
-        mClassLoaderField.set(mLoadedApk,pluginClassLoader);
+        mClassLoaderField.set(mLoadedApk, pluginClassLoader);
         WeakReference<Object> weakReference = new WeakReference<>(mLoadedApk);
-        mPackages.put(null,weakReference);
+        mPackages.put(null, weakReference);
     }
 
     /**
      * @return
-     * @throws Exception
-     * 获取 ApplicationInfo 为插件服务的
+     * @throws Exception 获取 ApplicationInfo 为插件服务的
      */
-    private ApplicationInfo getApplicationInfoAction() throws Exception{
+    private ApplicationInfo getApplicationInfoAction() throws Exception {
         // 执行此public static ApplicationInfo generateApplicationInfo方法，拿到ApplicationInfo
         Class mPackageParserClass = Class.forName("android.content.pm.PackageParser");
         Object mPackageParser = mPackageParserClass.newInstance();
@@ -357,4 +371,35 @@ public class HookApplication extends Application {
         return applicationInfo;
     }
 
+    /**
+     *hook绕过PMS包名安装校验
+     */
+    private void hookGetPackageInfo() {
+        try {
+            Class mActivityThreadClass = Class.forName("android.app.ActivityThread");
+            Field sCurrentActivityThreadField = mActivityThreadClass.getDeclaredField("sCurrentActivityThread");
+            sCurrentActivityThreadField.setAccessible(true);
+            Class mIPackageManagerClass = Class.forName("android.content.pm.IPackageManager");
+            Field sPackageManagerField = mActivityThreadClass.getDeclaredField("sPackageManager");
+            sPackageManagerField.setAccessible(true);
+            final Object packageManager = sPackageManagerField.get(null);
+            Object mIPackageManagerProxy = Proxy.newProxyInstance(getClassLoader(), new Class[]{mIPackageManagerClass}, new InvocationHandler() {
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                    if ("getPackageInfo".equals(method.getName())) {
+                        // 如何才能绕过 PMS, 欺骗系统
+                        // pi != null
+                        return new PackageInfo(); // 成功绕过 PMS检测
+                    }
+                    // 让系统正常继续执行下去
+                    return method.invoke(packageManager, args);
+                }
+            });
+
+            sPackageManagerField.set(null,mIPackageManagerProxy);
+        }catch (Exception e){
+            Log.e("Frizzle","hook绕过PMS校验失败...");
+            e.printStackTrace();
+        }
+    }
 }
