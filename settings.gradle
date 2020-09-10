@@ -1,0 +1,3 @@
+include ':plugin_package'
+include ':app'
+rootProject.name = "FrizzleHook"
